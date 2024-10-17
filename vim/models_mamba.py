@@ -24,6 +24,8 @@ from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 from rope import *
 import random
 
+from gilbert_d2xy import gilbert_d2xy
+
 try:
     from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:
@@ -38,6 +40,7 @@ __all__ = [
 
 class PatchEmbed(nn.Module):
     """ 2D Image to Patch Embedding
+    XXX to be changes to space filling curve
     """
     def __init__(self, img_size=224, patch_size=16, stride=16, in_chans=3, embed_dim=768, norm_layer=None, flatten=True):
         super().__init__()
@@ -52,16 +55,24 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=stride)
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
+    def hilbert_curve(self, in_tensor):
+        w, h = in_tensor.size(2), in_tensor.size(3)
+        out = torch.zeros(in_tensor.size(0), in_tensor.size(3)*in_tensor.size(2), in_tensor.size(1))
+        for i in self.num_patches:
+            x, y = gilbert_d2xy(i, w, h)
+            out[:, i, :] = in_tensor[:, :, x, y]
+        return out
+
     def forward(self, x):
         B, C, H, W = x.shape
         assert H == self.img_size[0] and W == self.img_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         x = self.proj(x)
         if self.flatten:
-            x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
+            x = self.hilbert_curve(x)
         x = self.norm(x)
         return x
-    
+
 
 class Block(nn.Module):
     def __init__(
@@ -106,7 +117,7 @@ class Block(nn.Module):
                 residual = hidden_states
             else:
                 residual = residual + self.drop_path(hidden_states)
-            
+
             hidden_states = self.norm(residual.to(dtype=self.norm.weight.dtype))
             if self.residual_in_fp32:
                 residual = residual.to(torch.float32)
@@ -131,7 +142,7 @@ class Block(nn.Module):
                     prenorm=True,
                     residual_in_fp32=self.residual_in_fp32,
                     eps=self.norm.eps,
-                )    
+                )
         hidden_states = self.mixer(hidden_states, inference_params=inference_params)
         return hidden_states, residual
 
@@ -227,20 +238,20 @@ def segm_init_weights(m):
 
 
 class VisionMamba(nn.Module):
-    def __init__(self, 
-                 img_size=224, 
-                 patch_size=16, 
+    def __init__(self,
+                 img_size=224,
+                 patch_size=16,
                  stride=16,
-                 depth=24, 
-                 embed_dim=192, 
+                 depth=24,
+                 embed_dim=192,
                  d_state=16,
-                 channels=3, 
+                 channels=3,
                  num_classes=1000,
-                 ssm_cfg=None, 
+                 ssm_cfg=None,
                  drop_rate=0.,
                  drop_path_rate=0.1,
-                 norm_epsilon: float = 1e-5, 
-                 rms_norm: bool = True, 
+                 norm_epsilon: float = 1e-5,
+                 rms_norm: bool = True,
                  initializer_cfg=None,
                  fused_add_norm=True,
                  residual_in_fp32=True,
@@ -264,7 +275,7 @@ class VisionMamba(nn.Module):
                  **kwargs):
         factory_kwargs = {"device": device, "dtype": dtype}
         # add factory_kwargs into kwargs
-        kwargs.update(factory_kwargs) 
+        kwargs.update(factory_kwargs)
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
         self.fused_add_norm = fused_add_norm
@@ -295,7 +306,7 @@ class VisionMamba(nn.Module):
             else:
                 self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
                 # self.num_tokens = 1
-            
+
         if if_abs_pos_embed:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, self.embed_dim))
             self.pos_drop = nn.Dropout(p=drop_rate)
@@ -338,7 +349,7 @@ class VisionMamba(nn.Module):
                 for i in range(depth)
             ]
         )
-        
+
         # output head
         self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
             embed_dim, eps=norm_epsilon, **factory_kwargs
@@ -603,7 +614,7 @@ def vim_small_patch16_stride8_224_bimambav2_final_pool_mean_abs_pos_embed_with_m
         )
         model.load_state_dict(checkpoint["model"])
     return model
-    
+
 @register_model
 def vim_base_patch16_224_bimambav2_final_pool_mean_abs_pos_embed_with_middle_cls_token_div2(pretrained=False, **kwargs):
     model = VisionMamba(
