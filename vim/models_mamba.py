@@ -40,9 +40,26 @@ __all__ = [
 
 class PatchEmbed(nn.Module):
     """ 2D Image to Patch Embedding
-    XXX to be changes to space filling curve
+    This current implementation of hilber curves is broken, something like this should be doneMS
+
+    def reshape_to_hilbert(tensor):
+        # Assume tensor is a square image: (batch_size, channels, height, width)
+        batch_size, channels, height, width = tensor.shape
+        assert height == width, "Image must be square"
+
+        # Generate Hilbert curve indices
+        indices = hilbert_curve_indices(height)
+
+        # Reshape the tensor
+        reshaped = tensor.reshape(batch_size, channels, -1)
+
+        # Use the indices to reorder the elements
+        hilbert_tensor = reshaped[:, :, indices]
+
+        return hilbert_tensor
     """
-    def __init__(self, img_size=224, patch_size=16, stride=16, in_chans=3, embed_dim=768, norm_layer=None, flatten=True):
+    def __init__(self, img_size=224, patch_size=16, stride=16, in_chans=3,
+                 embed_dim=768, norm_layer=None, flatten=True, hilberts=False):
         super().__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
@@ -51,17 +68,30 @@ class PatchEmbed(nn.Module):
         self.grid_size = ((img_size[0] - patch_size[0]) // stride + 1, (img_size[1] - patch_size[1]) // stride + 1)
         self.num_patches = self.grid_size[0] * self.grid_size[1]
         self.flatten = flatten
+        self.hilberts = hilberts
 
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=stride)
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
-    def hilbert_curve(self, in_tensor):
-        w, h = in_tensor.size(2), in_tensor.size(3)
-        out = torch.zeros(in_tensor.size(0), in_tensor.size(3)*in_tensor.size(2), in_tensor.size(1))
-        for i in self.num_patches:
-            x, y = gilbert_d2xy(i, w, h)
-            out[:, i, :] = in_tensor[:, :, x, y]
-        return out
+    def hilbert_flatten(self, in_tensor):
+        height = in_tensor.size(2)
+        width = in_tensor.size(3)
+        indicies = torch.zeros(height*width,2,dtype=torch.float64) # B, C, H*W
+
+        for i in range(height*width):
+            x, y = gilbert_d2xy(i, height, width) # gilbert = generalized hilbert curve
+            indicies[i, 0] = x
+            indicies[i, 1] = y
+
+        x_cords = indicies[:,0]
+        y_cords = indicies[:,1]
+
+        reordered_tensor = in_tensor[:,:,x_cords, y_cords]
+
+        batch_size, channels, _, _= in_tensor.shape
+
+        reordered_tensor = reordered_tensor.flatten(2).transpose(1, 2)
+        return reordered_tensor
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -69,7 +99,11 @@ class PatchEmbed(nn.Module):
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         x = self.proj(x)
         if self.flatten:
-            x = self.hilbert_curve(x)
+            if self.hilberts:
+                x = self.hilbert_flatten(x)
+            else:
+                x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
+
         x = self.norm(x)
         return x
 
